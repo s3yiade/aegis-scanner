@@ -74,8 +74,8 @@ function buildExpression(): { question: string; answer: number } {
   const b = crypto.randomInt(3, 25);
   const c = crypto.randomInt(3, 25);
   const ops = ['+', '-', '*'] as const;
-  const op1 = ops[crypto.randomInt(0, ops.length)];
-  const op2 = ops[crypto.randomInt(0, ops.length)];
+  const op1 = ops[crypto.randomInt(0, ops.length)] ?? '+';
+  const op2 = ops[crypto.randomInt(0, ops.length)] ?? '+';
 
   function apply(x: number, op: (typeof ops)[number], y: number): number {
     if (op === '+') return x + y;
@@ -148,7 +148,7 @@ async function markTokenUsed(sig: string, ttlMs: number): Promise<boolean> {
     try {
       // NX = only set if not already present -> atomic "claim" of this token.
       const ok = await redis.set(`aegis:captcha:used:${sig}`, '1', { nx: true, px: Math.max(ttlMs, 1000) });
-      return ok === 'OK' || ok === true;
+      return ok === 'OK';
     } catch (err) {
       // Same resilience pattern as lib/ratelimit.ts: a misconfigured or
       // permission-restricted Redis token (e.g. missing SET/SCRIPT) must

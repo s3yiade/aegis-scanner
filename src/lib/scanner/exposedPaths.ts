@@ -112,7 +112,7 @@ async function probe(target: SafeTarget, path: string): Promise<ProbeResult | nu
  * to download the whole thing — some of these paths (phpinfo output
  * especially) can be large, and this is a passive scanner, not a client
  * that needs the full page. */
-async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
+async function readBodyCapped(res: Awaited<ReturnType<typeof pinnedFetch>>, maxBytes: number): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) return '';
   const chunks: Uint8Array[] = [];

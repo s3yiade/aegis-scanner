@@ -316,7 +316,7 @@ function findGenericSecretMatch(content: string): boolean {
   GENERIC_SECRET_REGEX.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = GENERIC_SECRET_REGEX.exec(content))) {
-    if (isPlausibleSecretValue(match[2])) return true;
+    if (isPlausibleSecretValue(match[2] ?? '')) return true;
   }
   return false;
 }

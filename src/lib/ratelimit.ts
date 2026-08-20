@@ -25,10 +25,10 @@ interface BucketConfig {
   dailyLimit: number;
 }
 
-const BUCKETS: Record<string, BucketConfig> = {
+const BUCKETS = {
   scan: { hourlyLimit: 5, dailyLimit: 20 },
   lookup: { hourlyLimit: 8, dailyLimit: 25 },
-};
+} satisfies Record<string, BucketConfig>;
 
 export type RateLimitBucket = keyof typeof BUCKETS;
 

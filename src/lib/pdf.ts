@@ -59,7 +59,7 @@ export async function renderReportPdf(result: ScanResult, appName = 'Aegis'): Pr
     y -= 4;
     drawText(group.label, { size: 12, f: bold, color: [0.15, 0.2, 0.35] });
 
-    const ordered = [...group.findings].sort((a, b) => severityRank[b.severity] - severityRank[a.severity]);
+    const ordered = [...group.findings].sort((a, b) => (severityRank[b.severity] ?? 0) - (severityRank[a.severity] ?? 0));
 
     for (const finding of ordered) {
       const color = SEVERITY_COLOR[finding.severity] ?? [0.1, 0.1, 0.1];
