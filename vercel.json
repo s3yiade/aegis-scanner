@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/rescan",
+      "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/cron/clone-watch",
+      "schedule": "0 0 * * *"
+    }
+  ]
+}
