@@ -104,6 +104,11 @@ export async function checkHeaders(target: SafeTarget): Promise<Finding[]> {
     )
   );
 
+  const cspHeader = h.get('content-security-policy');
+  if (cspHeader) {
+    findings.push(evaluateCspQuality(cspHeader));
+  }
+
   findings.push(
     boolCheck(
       'referrer-policy',
@@ -226,4 +231,97 @@ function boolCheck(
     recommendation,
     passed,
   };
+}
+
+/**
+ * A CSP header being *present* (checked above) says almost nothing about
+ * whether it actually does anything — `script-src 'unsafe-inline' *` is
+ * present and provides close to zero protection. This scores the policy's
+ * actual restrictiveness: separate from presence, only runs when a CSP
+ * value exists at all.
+ *
+ * Weighted checklist rather than a single fragile boolean — several
+ * independent weaknesses can stack (missing script-src AND unsafe-inline
+ * AND no object-src, for instance), and the finding should reflect the
+ * worst one present rather than only ever reporting one at a time.
+ */
+function evaluateCspQuality(cspValue: string): Finding {
+  const directives = parseCspDirectives(cspValue);
+  const scriptSrc = directives.get('script-src') ?? directives.get('default-src') ?? [];
+  const hasScriptSrc = directives.has('script-src') || directives.has('default-src');
+  const hasNonceOrHash = scriptSrc.some((v) => v.startsWith("'nonce-") || v.startsWith("'sha256-") || v.startsWith("'sha384-") || v.startsWith("'sha512-"));
+
+  const weaknesses: string[] = [];
+  let worst: Finding['severity'] = 'pass';
+  const escalate = (s: Finding['severity']) => {
+    const rank: Record<Finding['severity'], number> = { pass: 0, info: 1, low: 2, medium: 3, high: 4, critical: 5 };
+    if (rank[s] > rank[worst]) worst = s;
+  };
+
+  if (!hasScriptSrc) {
+    weaknesses.push('No script-src or default-src directive at all — the policy provides no script restriction.');
+    escalate('high');
+  } else if (scriptSrc.includes('*') && !hasNonceOrHash) {
+    weaknesses.push("script-src allows a bare wildcard ('*') with no nonce/hash fallback — any host can serve script.");
+    escalate('high');
+  } else if (scriptSrc.includes("'unsafe-inline'") && !hasNonceOrHash) {
+    weaknesses.push("script-src allows 'unsafe-inline' with no nonce/hash — this defeats CSP's main protection against injected inline scripts.");
+    escalate('high');
+  }
+
+  if (scriptSrc.includes("'unsafe-eval'")) {
+    weaknesses.push("script-src allows 'unsafe-eval' — enables eval()/Function()-based code execution from a successful injection.");
+    escalate('medium');
+  }
+
+  const objectSrc = directives.get('object-src') ?? directives.get('default-src');
+  if (!objectSrc || (!objectSrc.includes("'none'") && !directives.has('object-src'))) {
+    weaknesses.push("No object-src 'none' — legacy plugin content (Flash/Java applets) isn't explicitly blocked.");
+    escalate('low');
+  }
+
+  if (!directives.has('base-uri')) {
+    weaknesses.push('No base-uri restriction — a successful injection could still redirect relative URLs via <base>.');
+    escalate('low');
+  }
+
+  if (weaknesses.length === 0) {
+    return {
+      id: 'csp-quality',
+      category: 'headers',
+      title: 'Content Security Policy strength',
+      severity: 'pass',
+      detail: hasNonceOrHash
+        ? 'Policy restricts script-src with a nonce/hash and avoids the common weakenings this check looks for.'
+        : 'Policy restricts script-src to specific sources and avoids the common weakenings this check looks for.',
+      recommendation: 'No action needed.',
+      passed: true,
+    };
+  }
+
+  return {
+    id: 'csp-quality',
+    category: 'headers',
+    title: 'Content Security Policy is weakened',
+    severity: worst,
+    detail: `A CSP is present, but: ${weaknesses.join(' ')}`,
+    recommendation:
+      "Tighten script-src to specific trusted hosts (or nonces/hashes for inline scripts), drop 'unsafe-inline'/'unsafe-eval' where possible, and add object-src 'none' and a base-uri restriction. A present-but-weak CSP gives a false sense of protection — most of its value comes from exactly the restrictions listed above.",
+    passed: false,
+  };
+}
+
+/** Minimal CSP directive parser — splits on `;`, first token per segment is
+ * the directive name, the rest are source values. Good enough for scoring
+ * purposes; doesn't need to validate the grammar, just extract values. */
+function parseCspDirectives(cspValue: string): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const segment of cspValue.split(';')) {
+    const parts = segment.trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) continue;
+    const [name, ...values] = parts;
+    if (!name) continue;
+    map.set(name.toLowerCase(), values.map((v) => v.toLowerCase()));
+  }
+  return map;
 }

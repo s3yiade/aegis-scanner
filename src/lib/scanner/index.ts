@@ -6,6 +6,10 @@ import { checkDns } from './dns';
 import { checkExposedPaths } from './exposedPaths';
 import { checkWebApp } from './webapp';
 import { checkSubdomainTakeover } from './subdomainTakeover';
+import { checkRecon } from './recon';
+import { checkCicdExposure } from './cicdChecks';
+import { checkCloudStorageExposure } from './cloudStorage';
+import { checkCertTransparencySubdomains } from './ctLogs';
 import { scanForCloneDomains } from './cloneDetection';
 import { scoreFindings } from './score';
 import type { CloneCandidate, Finding, ScanResult } from '@/types/scan';
@@ -14,6 +18,9 @@ export interface RunScanInput {
   targetUrl: string;
   targetType?: 'web' | 'api'; // agnostic: same checks apply, this only affects report framing
   niche?: string | null;
+  // Only meaningful when targetType === 'api' — tailors the recon check's
+  // access-surface path list and report copy. See lib/scanner/endpointNiche.ts.
+  endpointType?: string | null;
 }
 
 /**
@@ -27,23 +34,47 @@ export interface RunScanInput {
 export async function runScan(input: RunScanInput): Promise<ScanResult> {
   const target = await resolveSafeTarget(input.targetUrl);
 
-  const [headerFindings, tlsFindings, dnsFindings, takeoverFindings, exposureFindings, webAppFindings, cloneCandidates] =
-    await Promise.all([
-      checkHeaders(target).catch((): Finding[] => [errorFinding('headers', String(target.hostname))]),
-      checkTls(target).catch((): Finding[] => [errorFinding('tls', String(target.hostname))]),
-      checkDns(getRegistrableDomain(target.hostname)).catch((): Finding[] => [errorFinding('dns', String(target.hostname))]),
-      checkSubdomainTakeover(getRegistrableDomain(target.hostname)).catch((): Finding[] => [
-        errorFinding('dns', String(target.hostname)),
-      ]),
-      checkExposedPaths(target).catch((): Finding[] => [errorFinding('exposure', String(target.hostname))]),
-      checkWebApp(target).catch((): Finding[] => [errorFinding('webapp', String(target.hostname))]),
-      // DNS-only, bounded, cheap enough to run on every scan. The resulting
-      // list is never returned to an unauthenticated caller though — see
-      // api/scan (teaser only gets the count) and api/report (full report
-      // still only gets the count; the list itself needs a consult/paywall
-      // gate — api/consult).
-      scanForCloneDomains(target.hostname).catch((): CloneCandidate[] => []),
-    ]);
+  const [
+    headerFindings,
+    tlsFindings,
+    dnsFindings,
+    takeoverFindings,
+    exposureFindings,
+    webAppFindings,
+    reconFindings,
+    cicdFindings,
+    cloudStorageFindings,
+    ctLogFindings,
+    cloneCandidates,
+  ] = await Promise.all([
+    checkHeaders(target).catch((): Finding[] => [errorFinding('headers', String(target.hostname))]),
+    checkTls(target).catch((): Finding[] => [errorFinding('tls', String(target.hostname))]),
+    checkDns(getRegistrableDomain(target.hostname)).catch((): Finding[] => [errorFinding('dns', String(target.hostname))]),
+    checkSubdomainTakeover(getRegistrableDomain(target.hostname)).catch((): Finding[] => [
+      errorFinding('dns', String(target.hostname)),
+    ]),
+    checkExposedPaths(target).catch((): Finding[] => [errorFinding('exposure', String(target.hostname))]),
+    checkWebApp(target).catch((): Finding[] => [errorFinding('webapp', String(target.hostname))]),
+    // Threat-actor-style recon: HTTP method enumeration, verbose error
+    // disclosure, Host header trust, open redirects, and an
+    // endpoint-type-aware unauthenticated access-surface probe. Same
+    // agnostic/passive rules as everything else — see recon.ts.
+    checkRecon(target, { endpointType: input.endpointType }).catch((): Finding[] => [errorFinding('recon', String(target.hostname))]),
+    // CI/CD pipeline + supply-chain config exposure (GitHub Actions,
+    // CircleCI, Jenkins, Terraform state, .npmrc, etc.) — see cicdChecks.ts.
+    checkCicdExposure(target).catch((): Finding[] => [errorFinding('cicd', String(target.hostname))]),
+    // These two hit fixed external services (AWS/GCS, crt.sh) rather than
+    // the target itself — see the SSRF-reasoning comments in each file for
+    // why they use plain fetch instead of pinnedFetch.
+    checkCloudStorageExposure(target.hostname).catch((): Finding[] => [errorFinding('exposure', String(target.hostname))]),
+    checkCertTransparencySubdomains(getRegistrableDomain(target.hostname)).catch((): Finding[] => [errorFinding('dns', String(target.hostname))]),
+    // DNS-only, bounded, cheap enough to run on every scan. The resulting
+    // list is never returned to an unauthenticated caller though — see
+    // api/scan (teaser only gets the count) and api/report (full report
+    // still only gets the count; the list itself needs a consult/paywall
+    // gate — api/consult).
+    scanForCloneDomains(target.hostname).catch((): CloneCandidate[] => []),
+  ]);
 
   const findings = [
     ...headerFindings,
@@ -52,6 +83,10 @@ export async function runScan(input: RunScanInput): Promise<ScanResult> {
     ...takeoverFindings,
     ...exposureFindings,
     ...webAppFindings,
+    ...reconFindings,
+    ...cicdFindings,
+    ...cloudStorageFindings,
+    ...ctLogFindings,
   ];
   const { score, grade } = scoreFindings(findings);
 
@@ -64,6 +99,7 @@ export async function runScan(input: RunScanInput): Promise<ScanResult> {
     findings,
     scannedAt: new Date().toISOString(),
     niche: input.niche ?? null,
+    endpointType: input.endpointType ?? null,
     cloneCandidates,
   };
 }

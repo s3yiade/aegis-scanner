@@ -5,3 +5,6 @@ node_modules/
 .vercel
 *.log
 .DS_Store
+tsconfig.tsbuildinfo
+supabase/.temp/
+*.zip

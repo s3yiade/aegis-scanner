@@ -130,3 +130,57 @@ export async function sendMonitorAlert(input: {
   // alert email never aborts the rest of that run's monitor rechecks.
   if (error) console.error(`Resend rejected monitor alert to ${input.toEmail}:`, error);
 }
+
+/** Pro-tier (paid) monitoring alert — the diff version of sendMonitorAlert
+ * above. Sent instead of the plain score-changed email when a monitor is
+ * on the Pro tier (see monitors.tier, api/cron/rescan, lib/scanner/diff.ts)
+ * and lists exactly which checks started failing or got fixed, not just
+ * the aggregate score. */
+export async function sendMonitorDiffAlert(input: {
+  toEmail: string;
+  hostname: string;
+  previousScore: number | null;
+  newScore: number;
+  grade: string;
+  added: { title: string; severity: string }[];
+  resolved: { title: string; severity: string }[];
+  reportUrl: string;
+  diffHistoryUrl: string;
+  unsubscribeUrl: string;
+}) {
+  if (!resend || !process.env.DIGEST_FROM_EMAIL) return;
+  const delta = input.previousScore === null ? 0 : input.newScore - input.previousScore;
+  const direction = delta === 0 ? 'unchanged' : delta > 0 ? 'improved' : 'dropped';
+
+  const lines = [
+    `Your monitored site ${input.hostname} was re-scanned.`,
+    input.previousScore === null
+      ? `New score: ${input.newScore} (${input.grade})`
+      : `Score ${direction}: ${input.previousScore} → ${input.newScore} (${input.grade})`,
+    '',
+  ];
+
+  if (input.added.length > 0) {
+    lines.push(`New issues found (${input.added.length}):`);
+    for (const f of input.added) lines.push(`  - [${f.severity.toUpperCase()}] ${f.title}`);
+    lines.push('');
+  }
+
+  if (input.resolved.length > 0) {
+    lines.push(`Resolved since last scan (${input.resolved.length}):`);
+    for (const f of input.resolved) lines.push(`  - ${f.title}`);
+    lines.push('');
+  }
+
+  lines.push(`Full report: ${input.reportUrl}`, `Diff history: ${input.diffHistoryUrl}`, '', `Unsubscribe from monitoring: ${input.unsubscribeUrl}`);
+
+  const subjectDetail = input.added.length > 0 ? ` — ${input.added.length} new issue(s)` : input.resolved.length > 0 ? ` — ${input.resolved.length} resolved` : '';
+
+  const { error } = await resend.emails.send({
+    from: process.env.DIGEST_FROM_EMAIL,
+    to: input.toEmail,
+    subject: `${input.hostname} scan diff${subjectDetail}`,
+    text: lines.join('\n'),
+  });
+  if (error) console.error(`Resend rejected monitor diff alert to ${input.toEmail}:`, error);
+}

@@ -4,18 +4,13 @@ import { useEffect, useState } from 'react';
 import type { TeaserResult } from '@/types/scan';
 import { useCaptcha } from '@/hooks/useCaptcha';
 import CaptchaField from '@/components/CaptchaField';
+import ScanningDialog from '@/components/ScanningDialog';
 import { useIsAdmin } from '@/hooks/useIsAdmin';
 import { useIdleTimeout } from '@/hooks/useIdleTimeout';
 import { IDLE_TIMEOUT_MS } from '@/lib/idleConfig';
+import { listEndpointTypes } from '@/lib/scanner/endpointNiche';
 
-const NICHES = [
-  { value: 'jewelry', label: 'Jewelry / high-value retail' },
-  { value: 'ecommerce', label: 'E-commerce' },
-  { value: 'professional_services', label: 'Professional services' },
-  { value: 'healthcare', label: 'Healthcare / clinic' },
-  { value: 'contractor_trades', label: 'Contractor / trades' },
-  { value: 'restaurant_hospitality', label: 'Restaurant / hospitality' },
-];
+const ENDPOINT_TYPES = listEndpointTypes();
 
 const URL_MAX_LEN = 300;
 
@@ -50,12 +45,18 @@ export interface ScanFormProps {
   heading: string;
   subheading: string;
   storageKeyPrefix: string; // keeps Web/SaaS tab persistence separate
+  // Business-type options offered in the "Business type" select. Different
+  // per page (general/website page vs. SaaS page) — see lib/scanner/niche.ts
+  // for the underlying copy each value maps to.
+  niches: { value: string; label: string }[];
+  nichesLabel?: string; // e.g. "Business type" vs "What kind of SaaS?"
 }
 
-export default function ScanForm({ defaultTargetType, heading, subheading, storageKeyPrefix }: ScanFormProps) {
+export default function ScanForm({ defaultTargetType, heading, subheading, storageKeyPrefix, niches, nichesLabel }: ScanFormProps) {
   const [url, setUrl] = useState('');
   const [targetType, setTargetType] = useState<'web' | 'api'>(defaultTargetType);
   const [niche, setNiche] = useState('');
+  const [endpointType, setEndpointType] = useState('');
   const [ownershipConfirmed, setOwnershipConfirmed] = useState(false);
   const captcha = useCaptcha();
   const [loading, setLoading] = useState(false);
@@ -69,14 +70,17 @@ export default function ScanForm({ defaultTargetType, heading, subheading, stora
   useIdleTimeout(IDLE_TIMEOUT_MS, () => {
     setUrl('');
     setNiche('');
+    setEndpointType('');
   });
 
   useEffect(() => {
     try {
       const lastUrl = window.localStorage.getItem(`${storageKeyPrefix}:lastUrl`);
       const lastNiche = window.localStorage.getItem(`${storageKeyPrefix}:lastNiche`);
+      const lastEndpointType = window.localStorage.getItem(`${storageKeyPrefix}:lastEndpointType`);
       if (lastUrl) setUrl(lastUrl);
       if (lastNiche) setNiche(lastNiche);
+      if (lastEndpointType) setEndpointType(lastEndpointType);
     } catch {
       // localStorage unavailable — fine, just skip persistence
     }
@@ -98,6 +102,14 @@ export default function ScanForm({ defaultTargetType, heading, subheading, stora
       // ignore
     }
   }, [niche, storageKeyPrefix]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(`${storageKeyPrefix}:lastEndpointType`, endpointType);
+    } catch {
+      // ignore
+    }
+  }, [endpointType, storageKeyPrefix]);
 
   function handleUrlChange(e: React.ChangeEvent<HTMLInputElement>) {
     setUrl(sanitizeUrlInput(e.target.value));
@@ -129,6 +141,7 @@ export default function ScanForm({ defaultTargetType, heading, subheading, stora
           url,
           targetType,
           niche: niche || null,
+          endpointType: targetType === 'api' ? endpointType || null : null,
           ownershipConfirmed: true,
           captcha: isAdmin ? {} : captcha.payload,
         }),
@@ -154,6 +167,8 @@ export default function ScanForm({ defaultTargetType, heading, subheading, stora
 
   return (
     <>
+      {loading && <ScanningDialog />}
+
       <FunnelSteps current={1} />
 
       <div className="hero">
@@ -182,10 +197,24 @@ export default function ScanForm({ defaultTargetType, heading, subheading, stora
           <option value="api">API endpoint / backend</option>
         </select>
 
-        <label htmlFor="niche">Business type (optional — tailors the results)</label>
+        {targetType === 'api' && (
+          <>
+            <label htmlFor="endpointType">Endpoint type (optional — adds targeted checks)</label>
+            <select id="endpointType" value={endpointType} onChange={(e) => setEndpointType(e.target.value)}>
+              <option value="">Not sure / general API</option>
+              {ENDPOINT_TYPES.map((et) => (
+                <option key={et.value} value={et.value}>
+                  {et.label}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+
+        <label htmlFor="niche">{nichesLabel ?? 'Business type'} (optional — tailors the results)</label>
         <select id="niche" value={niche} onChange={(e) => setNiche(e.target.value)}>
           <option value="">Prefer not to say</option>
-          {NICHES.map((n) => (
+          {niches.map((n) => (
             <option key={n.value} value={n.value}>
               {n.label}
             </option>

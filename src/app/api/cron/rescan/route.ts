@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'node:crypto';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { runScan } from '@/lib/scanner';
-import { sendMonitorAlert } from '@/lib/email';
+import { sendMonitorAlert, sendMonitorDiffAlert } from '@/lib/email';
 import { refreshNicheBenchmark } from '@/lib/scanner/benchmark';
+import { diffFindings, diffHasNotableChange } from '@/lib/scanner/diff';
 import { SSRFBlockedError } from '@/lib/ssrfGuard';
+import type { Finding } from '@/types/scan';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,11 +25,19 @@ export const maxDuration = 300; // allow room for many sequential scans
  * monitor even if both fire close together.
  *
  * For every claimed monitor:
- *   1. Re-scan the target.
+ *   1. Re-scan the target (same targetType/niche/endpointType as the
+ *      original scan — see the tier/niche/endpoint_type columns added to
+ *      `monitors` for the Pro tier, but carried for every monitor so a
+ *      SaaS/API scan's re-scans don't silently drift back to generic 'web'
+ *      framing).
  *   2. Store the new scan row (this doubles as the "since your last scan"
  *      history — Part 3 idea #2 — since scans.hostname lets you pull every
  *      prior scan for a domain and diff scores over time).
- *   3. Email the subscriber if the score changed.
+ *   3. Pro-tier monitors: compute a structured diff (added/resolved/changed
+ *      findings — see lib/scanner/diff.ts) against the previous scan, store
+ *      it in monitor_diffs, and email a diff alert if there's anything
+ *      notable. Free-tier monitors: plain "your score changed" email, same
+ *      as before.
  *   4. Advance next_run_at and release the claim.
  * Also refreshes niche benchmark aggregates once per run.
  */
@@ -78,7 +88,12 @@ async function handleRescan(req: NextRequest) {
 
   for (const monitor of claimedMonitors ?? []) {
     try {
-      const scanResult = await runScan({ targetUrl: monitor.target_url });
+      const scanResult = await runScan({
+        targetUrl: monitor.target_url,
+        targetType: monitor.target_type,
+        niche: monitor.niche,
+        endpointType: monitor.endpoint_type,
+      });
 
       const { data: inserted } = await supabase
         .from('scans')
@@ -89,7 +104,8 @@ async function handleRescan(req: NextRequest) {
           score: scanResult.score,
           grade: scanResult.grade,
           findings: scanResult.findings,
-          niche: null,
+          niche: scanResult.niche,
+          endpoint_type: scanResult.endpointType,
           clone_candidates: scanResult.cloneCandidates,
           clone_candidate_count: scanResult.cloneCandidates.length,
           clone_scan_status: 'complete',
@@ -110,7 +126,69 @@ async function handleRescan(req: NextRequest) {
         })
         .eq('id', monitor.id);
 
-      if (scanResult.score !== monitor.last_score && inserted) {
+      if (monitor.tier === 'pro' && inserted) {
+        // Pro tier: structured diff against the previous scan, stored for
+        // the diff-history page (api/monitor/[id]/diffs) and emailed if
+        // there's anything worth a subscriber's attention. Falls back to
+        // the plain score-changed email below only if this fails, so a
+        // transient DB read error doesn't leave a paying subscriber with
+        // no notification at all.
+        let diffSent = false;
+        try {
+          const previousFindings: Finding[] | null = monitor.last_scan_id
+            ? await supabase
+                .from('scans')
+                .select('findings')
+                .eq('id', monitor.last_scan_id)
+                .single()
+                .then((r) => (r.data?.findings as Finding[] | undefined) ?? null)
+            : null;
+
+          const diff = diffFindings(previousFindings, scanResult.findings, monitor.last_score, scanResult.score);
+
+          await supabase.from('monitor_diffs').insert({
+            monitor_id: monitor.id,
+            previous_scan_id: monitor.last_scan_id,
+            new_scan_id: inserted.id,
+            score_delta: diff.scoreDelta,
+            added_findings: diff.added,
+            resolved_findings: diff.resolved,
+            changed_findings: diff.changed,
+          });
+
+          if (previousFindings !== null && diffHasNotableChange(diff)) {
+            await sendMonitorDiffAlert({
+              toEmail: monitor.email,
+              hostname: monitor.hostname,
+              previousScore: monitor.last_score,
+              newScore: scanResult.score,
+              grade: scanResult.grade,
+              added: diff.added,
+              resolved: diff.resolved,
+              reportUrl: `${appUrl}/report/${inserted.id}`,
+              diffHistoryUrl: `${appUrl}/monitor/${monitor.id}?token=${monitor.unsubscribe_token}`,
+              unsubscribeUrl: `${appUrl}/api/monitor?token=${monitor.unsubscribe_token}`,
+            });
+            diffSent = true;
+            results.alerted += 1;
+          }
+        } catch (diffErr) {
+          console.error(`Diff generation failed for monitor ${monitor.id}`, diffErr);
+        }
+
+        if (!diffSent && scanResult.score !== monitor.last_score) {
+          await sendMonitorAlert({
+            toEmail: monitor.email,
+            hostname: monitor.hostname,
+            previousScore: monitor.last_score,
+            newScore: scanResult.score,
+            grade: scanResult.grade,
+            reportUrl: `${appUrl}/report/${inserted.id}`,
+            unsubscribeUrl: `${appUrl}/api/monitor?token=${monitor.unsubscribe_token}`,
+          });
+          results.alerted += 1;
+        }
+      } else if (scanResult.score !== monitor.last_score && inserted) {
         await sendMonitorAlert({
           toEmail: monitor.email,
           hostname: monitor.hostname,

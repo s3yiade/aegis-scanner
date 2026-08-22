@@ -13,9 +13,24 @@ import { resolveSafeTarget } from '@/lib/ssrfGuard';
  * milliseconds) and costs money per call on a hosted rendering service.
  *
  * The URL is still validated through the same SSRF guard used everywhere
- * else before being handed to the third-party renderer — not because the
- * renderer's own sandboxing can't be trusted, but so an obviously-internal
- * -looking target never gets sent to a third party either.
+ * else before being handed to the third-party renderer. Worth being exact
+ * about what this does and doesn't close: unlike pinnedFetch, there's no
+ * way to pin the connection Browserless's own infrastructure makes when
+ * it navigates — it does its own DNS resolution at browse time, seconds
+ * after the check here. That leaves a narrow DNS-rebinding window (a
+ * domain with a very short TTL that resolves publicly at check-time and
+ * privately by the time Browserless navigates) that this guard can't
+ * close by itself. What it DOES reliably stop: anyone submitting an
+ * obviously-internal target directly (localhost, RFC1918 ranges, cloud
+ * metadata IPs, .local/.internal). The residual risk is real but narrow,
+ * and this path is only reachable through the fully-gated consult flow
+ * (captcha + rate limit + disposable-email block + origin check — see
+ * api/consult), not the free/anonymous scan path, which meaningfully
+ * raises the bar for a real attacker over a drive-by attempt. If
+ * RENDER_API_URL is ever pointed at a self-hosted renderer instead of
+ * Browserless's hosted product, confirm that instance has its own
+ * SSRF/navigation protections — this app has no way to verify that for
+ * infrastructure it doesn't run.
  *
  * Gracefully no-ops if RENDER_API_KEY isn't configured.
  */

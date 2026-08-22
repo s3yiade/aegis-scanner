@@ -1,6 +1,7 @@
 import TopNav from '@/components/TopNav';
 import ScanForm from '@/components/ScanForm';
 import SiteFooter from '@/components/SiteFooter';
+import { listNiches } from '@/lib/scanner/niche';
 
 export default function HomePage() {
   return (
@@ -19,6 +20,8 @@ export default function HomePage() {
         heading="Free security scan for any website or web app"
         subheading="Headers, TLS, DNS mail-spoofing protection, and common exposed files — checked in under a minute."
         storageKeyPrefix="aegis-web"
+        niches={listNiches('general')}
+        nichesLabel="Business type"
       />
 
       <div className="stat-strip">

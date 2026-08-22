@@ -1,6 +1,7 @@
 import TopNav from '@/components/TopNav';
 import ScanForm from '@/components/ScanForm';
 import SiteFooter from '@/components/SiteFooter';
+import { listNiches } from '@/lib/scanner/niche';
 
 export default function SaasScansPage() {
   return (
@@ -10,15 +11,17 @@ export default function SaasScansPage() {
       <div className="scan-readout" aria-hidden="true">
         <div className="line"><span className="name">CORS policy</span><span className="ok">PASS</span></div>
         <div className="line"><span className="name">GraphQL introspection</span><span className="ok">PASS</span></div>
-        <div className="line"><span className="name">Client-side secrets</span><span className="warn">REVIEW</span></div>
-        <div className="line"><span className="name">Source maps exposed</span><span className="ok">PASS</span></div>
+        <div className="line"><span className="name">Endpoint access control</span><span className="warn">REVIEW</span></div>
+        <div className="line"><span className="name">Open redirect</span><span className="ok">PASS</span></div>
       </div>
 
       <ScanForm
         defaultTargetType="api"
         heading="Security scan built for SaaS and web apps"
-        subheading="Everything in the standard scan, plus CORS misconfiguration, GraphQL introspection, exposed API docs, client-side secrets, source maps, and supply-chain (SRI) checks."
+        subheading="Everything in the standard scan, plus CORS, GraphQL introspection, exposed API docs, client-side secrets, source maps, and attack-surface recon — HTTP method enumeration, verbose error disclosure, Host header trust, open redirects, and unauthenticated endpoint exposure, tailored to the endpoint type you're scanning."
         storageKeyPrefix="aegis-saas"
+        niches={listNiches('saas')}
+        nichesLabel="SaaS category"
       />
 
       <div className="stat-strip">
@@ -31,12 +34,12 @@ export default function SaasScansPage() {
           <span className="label">introspection probe</span>
         </div>
         <div className="stat-item">
-          <span className="num">5 files</span>
-          <span className="label">scanned for secrets</span>
+          <span className="num">6</span>
+          <span className="label">attack-surface recon checks</span>
         </div>
         <div className="stat-item">
-          <span className="num">SRI</span>
-          <span className="label">supply-chain check</span>
+          <span className="num">6</span>
+          <span className="label">endpoint types supported</span>
         </div>
       </div>
 
@@ -60,6 +63,16 @@ export default function SaasScansPage() {
           <div className="icon">▤</div>
           <h4>Source maps &amp; SRI</h4>
           <p>Flags exposed <code>.map</code> files and third-party scripts loaded without an integrity attribute.</p>
+        </div>
+        <div className="module-card">
+          <div className="icon">⌖</div>
+          <h4>Endpoint access surface</h4>
+          <p>Tell us it&apos;s a billing, admin, profile, webhook, internal, or public-data endpoint, and we probe the paths that endpoint type commonly exposes — the same first move a threat actor researching your API would make.</p>
+        </div>
+        <div className="module-card">
+          <div className="icon">↷</div>
+          <h4>Recon: methods, errors, redirects</h4>
+          <p>HTTP method enumeration (TRACE/PUT/DELETE), verbose stack-trace/debug-page disclosure, Host header trust (X-Forwarded-Host reflection), open redirects, and a rate-limit heuristic.</p>
         </div>
       </div>
 

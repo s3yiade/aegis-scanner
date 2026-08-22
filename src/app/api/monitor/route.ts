@@ -60,7 +60,7 @@ export async function POST(req: NextRequest) {
   const supabase = getSupabaseAdmin();
   const { data: scan, error: scanError } = await supabase
     .from('scans')
-    .select('id, hostname, target_url, score')
+    .select('id, hostname, target_url, score, target_type, niche, endpoint_type')
     .eq('id', body.scanId)
     .single();
 
@@ -78,6 +78,9 @@ export async function POST(req: NextRequest) {
       {
         hostname: scan.hostname,
         target_url: scan.target_url,
+        target_type: scan.target_type,
+        niche: scan.niche,
+        endpoint_type: scan.endpoint_type,
         email: body.email,
         frequency: body.frequency,
         active: true,

@@ -8,6 +8,7 @@ import { useIdleTimeout } from '@/hooks/useIdleTimeout';
 import { useIsAdmin } from '@/hooks/useIsAdmin';
 import { IDLE_TIMEOUT_MS } from '@/lib/idleConfig';
 import { groupByCategory } from '@/lib/scanner/categories';
+import { summarizeCompliance, FRAMEWORK_META, COMPLIANCE_DISCLAIMER, type ComplianceFramework } from '@/lib/scanner/compliance';
 import BackBar from '@/components/BackBar';
 
 interface FullReport {
@@ -22,6 +23,8 @@ interface FullReport {
   scannedAt?: string;
   niche?: string | null;
   nicheCopy?: { label: string; whyItMatters: string; exposureFraming: string };
+  endpointType?: string | null;
+  endpointCopy?: { label: string; whyItMatters: string; probePaths: string[] } | null;
   benchmark?: { avgScore: number; avgGrade: string; sampleSize: number } | null;
   cloneCandidateCount: number;
 }
@@ -39,6 +42,7 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const [resumeError, setResumeError] = useState<string | null>(null);
   const [resuming, setResuming] = useState(false);
   const [showBookConsult, setShowBookConsult] = useState(false);
+  const [badgeStyleState, setBadgeStyleState] = useState<'detailed' | 'compact'>('detailed');
   const { isAdmin, adminEmail } = useIsAdmin();
 
   useEffect(() => {
@@ -186,8 +190,10 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
   const findings = report.findings ?? [];
   const failed = findings.filter((f) => !f.passed);
   const passed = findings.filter((f) => f.passed);
-  const badgeUrl = `/api/badge/${id}`;
-  const embedSnippet = `<a href="${typeof window !== 'undefined' ? window.location.origin : ''}/report/${id}"><img src="${typeof window !== 'undefined' ? window.location.origin : ''}${badgeUrl}" alt="Security scan badge" /></a>`;
+  const badgeStyle = badgeStyleState;
+  const badgeUrl = `/api/badge/${id}${badgeStyle === 'compact' ? '?style=compact' : ''}`;
+  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const embedSnippet = `<a href="${origin}/report/${id}"><img src="${origin}${badgeUrl}" alt="Security scan badge" /></a>`;
 
   return (
     <div className="container">
@@ -209,6 +215,12 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         {report.nicheCopy && (
           <p className="muted" style={{ marginTop: 12 }}>
             <strong>Why this matters for {report.nicheCopy.label.toLowerCase()}:</strong> {report.nicheCopy.whyItMatters}
+          </p>
+        )}
+
+        {report.endpointCopy && (
+          <p className="muted" style={{ marginTop: 12 }}>
+            <strong>Why this matters for a {report.endpointCopy.label.toLowerCase()}:</strong> {report.endpointCopy.whyItMatters}
           </p>
         )}
 
@@ -257,6 +269,8 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         </div>
       )}
 
+      <ComplianceSection findings={findings} />
+
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Get alerted if this changes</h3>
         <p className="muted">Free weekly re-scan with an email alert if the score moves.</p>
@@ -281,11 +295,24 @@ export default function ReportPage({ params }: { params: Promise<{ id: string }>
         )}
       </div>
 
+      {report.targetType === 'api' && <SaasMonitorProCard scanId={id} isAdmin={isAdmin} adminEmail={adminEmail} />}
+
       <CloneProtectionCard scanId={id} cloneCandidateCount={report.cloneCandidateCount} isAdmin={isAdmin} adminEmail={adminEmail} />
 
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Show your score</h3>
-        <p className="muted">Embed this badge on your site:</p>
+        <p className="muted">
+          Embed this badge on your site — it shows your grade, score, and scan date, and visibly flags itself as due for a
+          re-scan after {60} days rather than displaying a stale result indefinitely.
+        </p>
+        <div className="badge-style-toggle" role="group" aria-label="Badge style">
+          <button type="button" className={badgeStyleState === 'detailed' ? 'active' : ''} onClick={() => setBadgeStyleState('detailed')}>
+            Detailed
+          </button>
+          <button type="button" className={badgeStyleState === 'compact' ? 'active' : ''} onClick={() => setBadgeStyleState('compact')}>
+            Compact
+          </button>
+        </div>
         <img src={badgeUrl} alt="Security scan badge" />
         <textarea
           readOnly
@@ -401,6 +428,92 @@ function BookConsultModal({
           </form>
         )}
       </div>
+    </div>
+  );
+}
+
+function SaasMonitorProCard({ scanId, isAdmin, adminEmail }: { scanId: string; isAdmin: boolean; adminEmail: string | null }) {
+  const captcha = useCaptcha();
+  const [email, setEmail] = useState(adminEmail ?? '');
+  const [frequency, setFrequency] = useState<'daily' | 'weekly'>('daily');
+  const [status, setStatus] = useState<'idle' | 'submitting' | 'error' | 'active'>('idle');
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleUpgrade(e: React.FormEvent) {
+    e.preventDefault();
+    setStatus('submitting');
+    setError(null);
+    try {
+      const res = await fetch('/api/stripe/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scanId,
+          product: 'saas_monitor_pro',
+          email,
+          frequency,
+          captcha: isAdmin ? {} : captcha.payload,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || 'Could not start checkout.');
+        captcha.reload();
+        setStatus('error');
+        return;
+      }
+      if (data.adminGranted) {
+        setStatus('active');
+        return;
+      }
+      if (data.checkoutUrl) {
+        window.location.href = data.checkoutUrl;
+        return;
+      }
+      setStatus('idle');
+    } catch {
+      setError('Network error — please try again.');
+      setStatus('error');
+    }
+  }
+
+  if (status === 'active') {
+    return (
+      <div className="card">
+        <h3 style={{ marginTop: 0 }}>Continuous monitoring — Pro</h3>
+        <p>Pro monitoring is active. You&apos;ll get a diff email whenever something changes, plus the ability to review the full history.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>Continuous monitoring — Pro</h3>
+      <p className="muted">
+        Everything the free monitor does, plus a structured diff report on every re-scan — exactly which checks started failing,
+        which got fixed, and which changed severity, not just the overall score. Built for SaaS/API targets, where a single new
+        endpoint or a changed CORS policy is worth knowing about the day it happens, not whenever someone next runs a manual scan.
+      </p>
+      <form onSubmit={handleUpgrade}>
+        <input
+          type="email"
+          required
+          maxLength={320}
+          placeholder="you@business.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <label htmlFor="pro-frequency">Re-scan frequency</label>
+        <select id="pro-frequency" value={frequency} onChange={(e) => setFrequency(e.target.value as 'daily' | 'weekly')}>
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly</option>
+        </select>
+        <CaptchaField captcha={captcha} isAdmin={isAdmin} />
+        <button type="submit" disabled={status === 'submitting'}>
+          {status === 'submitting' ? 'Starting checkout…' : 'Upgrade to continuous monitoring'}
+        </button>
+        {status === 'error' && <div className="error">{error || 'Could not start checkout — try again.'}</div>}
+      </form>
     </div>
   );
 }
@@ -779,6 +892,70 @@ function CloneWatchModal({
           </button>
         </form>
       </div>
+    </div>
+  );
+}
+
+function ComplianceSection({ findings }: { findings: Finding[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const summary = summarizeCompliance(findings);
+  const frameworks = Object.keys(summary) as ComplianceFramework[];
+  const totalMapped = frameworks.reduce((sum, fw) => sum + summary[fw].length, 0);
+
+  if (totalMapped === 0) return null;
+
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>Compliance framework mapping</h3>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>{COMPLIANCE_DISCLAIMER}</p>
+
+      <div className="compliance-framework-grid">
+        {frameworks.map((fw) => {
+          const controls = summary[fw];
+          if (controls.length === 0) return null;
+          const gaps = controls.filter((c) => c.status === 'gap');
+          return (
+            <div className="compliance-framework-card" key={fw}>
+              <div className="compliance-framework-title">{FRAMEWORK_META[fw].shortLabel}</div>
+              <div className={gaps.length > 0 ? 'compliance-gap-count gap' : 'compliance-gap-count clear'}>
+                {gaps.length > 0 ? `${gaps.length} control${gaps.length === 1 ? '' : 's'} to review` : 'No gaps flagged'}
+              </div>
+              <div className="muted" style={{ fontSize: '0.78rem' }}>{controls.length} control(s) touched by this scan</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button type="button" className="modal-back" style={{ marginTop: 8 }} onClick={() => setExpanded((v) => !v)}>
+        {expanded ? 'Hide control detail ▲' : 'Show control detail ▼'}
+      </button>
+
+      {expanded &&
+        frameworks.map((fw) => {
+          const controls = summary[fw];
+          if (controls.length === 0) return null;
+          return (
+            <div key={fw} className="finding-category-group">
+              <h4 className="finding-category-heading">{FRAMEWORK_META[fw].label}</h4>
+              {controls.map((c) => (
+                <div className={`finding ${c.status === 'gap' ? 'medium' : 'pass'}`} key={`${fw}:${c.controlId}`}>
+                  <div className="title">
+                    {c.controlId} — {c.controlTitle}
+                    <span
+                      className="severity-tag"
+                      style={{ background: c.status === 'gap' ? '#e0b400' : '#1ea34c', color: '#0b0f19' }}
+                    >
+                      {c.status === 'gap' ? 'review' : 'clear'}
+                    </span>
+                  </div>
+                  {c.relatedFindingTitles.length > 0 && (
+                    <div className="detail">Related: {c.relatedFindingTitles.join(', ')}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })}
     </div>
   );
 }

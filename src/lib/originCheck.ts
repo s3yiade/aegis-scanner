@@ -9,7 +9,16 @@
  */
 export function isSameOrigin(req: Request): boolean {
   const appUrl = process.env.APP_URL;
-  if (!appUrl) return true; // can't verify without a configured app URL — fail open in dev
+  if (!appUrl) {
+    // Fails CLOSED in production — an unset APP_URL would otherwise make
+    // this check silently no-op on every route that relies on it (lead
+    // capture, monitor signup), and a misconfigured/missing env var is a
+    // far more likely real-world cause than "this is intentionally local
+    // dev." Only actual local development (no NODE_ENV=production) gets
+    // the permissive fallback.
+    if (process.env.NODE_ENV === 'production') return false;
+    return true;
+  }
 
   let appOrigin: string;
   try {

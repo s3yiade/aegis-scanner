@@ -29,6 +29,11 @@ const ScanRequestSchema = z.object({
     .regex(SINGLE_LINE_NO_CONTROL_CHARS, 'URL must be a single line with no control characters'),
   targetType: z.enum(['web', 'api']).optional().default('web'),
   niche: z.string().max(64).optional().nullable(),
+  // Only meaningful when targetType === 'api'. Free-form-validated (not a
+  // strict enum) the same way `niche` is, so an unrecognized value just
+  // falls back to generic copy/paths server-side instead of a 400 — see
+  // getEndpointCopy in lib/scanner/endpointNiche.ts.
+  endpointType: z.string().max(64).optional().nullable(),
   // Zero-trust framing: this checkbox is a legal/audit acknowledgment, not
   // a technical safeguard — the SSRF guard, rate limiting, and captcha are
   // what actually constrain what gets scanned. Requiring explicit
@@ -95,7 +100,7 @@ export async function POST(req: NextRequest) {
   // --- 5. Run the scan (SSRF-guarded inside runScan) ---
   let result;
   try {
-    result = await runScan({ targetUrl: rawUrl, targetType: body.targetType, niche: body.niche });
+    result = await runScan({ targetUrl: rawUrl, targetType: body.targetType, niche: body.niche, endpointType: body.endpointType });
   } catch (err) {
     if (err instanceof SSRFBlockedError) {
       // Deliberately vague to avoid confirming internal network layout to a probing user.
@@ -117,6 +122,7 @@ export async function POST(req: NextRequest) {
       grade: result.grade,
       findings: result.findings,
       niche: result.niche,
+      endpoint_type: result.endpointType,
       ip_address: hashIp(clientIp),
       ownership_acknowledged: body.ownershipConfirmed || isAdmin,
       ownership_ack_at: body.ownershipConfirmed || isAdmin ? new Date().toISOString() : null,

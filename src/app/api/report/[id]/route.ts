@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { getNicheCopy } from '@/lib/scanner/niche';
+import { getEndpointCopy } from '@/lib/scanner/endpointNiche';
 import { getBenchmark } from '@/lib/scanner/benchmark';
 import { verifyAdminSession, ADMIN_SESSION_COOKIE } from '@/lib/adminAuth';
 
@@ -57,6 +58,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
   const nicheCopy = getNicheCopy(scan.niche);
   const benchmark = scan.niche ? await getBenchmark(scan.niche) : null;
+  const endpointCopy = scan.target_type === 'api' ? getEndpointCopy(scan.endpoint_type) : null;
 
   return NextResponse.json({
     unlocked: true,
@@ -69,6 +71,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     scannedAt: scan.scanned_at,
     niche: scan.niche,
     nicheCopy,
+    endpointType: scan.endpoint_type,
+    endpointCopy,
     benchmark,
     // The count is fine to show once the free report is unlocked — it's the
     // domain list itself (and the content-similarity results) that stay

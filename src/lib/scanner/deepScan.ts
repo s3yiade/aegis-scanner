@@ -49,9 +49,11 @@ export async function runDeepScan(targetUrl: string): Promise<DeepScanResult> {
     return { status: 'failed', findings: [] };
   }
 
+  const page = [{ url: targetUrl, html }];
+
   const [secrets, sri, trust] = await Promise.all([
-    checkSourceMapsAndSecrets(target, html).catch((): Finding[] => []),
-    Promise.resolve(checkSRI(html, target)),
+    checkSourceMapsAndSecrets(target, page).catch((): Finding[] => []),
+    Promise.resolve(checkSRI(page, target)),
     Promise.resolve(checkTrustSignals(html)),
   ]);
 

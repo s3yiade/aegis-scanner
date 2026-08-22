@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { getSupabaseAdmin } from '@/lib/supabase';
 import { renderReportPdf } from '@/lib/pdf';
+import { getNicheCopy } from '@/lib/scanner/niche';
+import { getEndpointCopy } from '@/lib/scanner/endpointNiche';
+import { getBenchmark } from '@/lib/scanner/benchmark';
 import type { ScanResult } from '@/types/scan';
 
 export const dynamic = 'force-dynamic';
@@ -41,10 +44,20 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
     findings: scan.findings,
     scannedAt: scan.scanned_at,
     niche: scan.niche,
+    endpointType: scan.endpoint_type,
     cloneCandidates: scan.clone_candidates ?? [],
   };
 
-  const pdfBytes = await renderReportPdf(result, process.env.APP_NAME || 'Aegis');
+  const nicheCopy = getNicheCopy(scan.niche);
+  const endpointCopy = scan.target_type === 'api' ? getEndpointCopy(scan.endpoint_type) : null;
+  const benchmark = scan.niche ? await getBenchmark(scan.niche) : null;
+
+  const pdfBytes = await renderReportPdf(result, process.env.APP_NAME || 'Aegis', {
+    targetType: result.targetType,
+    nicheCopy: scan.niche ? nicheCopy : null,
+    endpointCopy,
+    benchmark,
+  });
 
   return new NextResponse(Buffer.from(pdfBytes), {
     headers: {

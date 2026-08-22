@@ -879,6 +879,122 @@ button:disabled {
   text-align: left;
 }
 
+/* Scanning dialog — shown instead of freezing the page while a scan runs.
+   Reuses .modal-overlay/.modal-content; no .modal-back since it's not
+   dismissible (there's nothing to go "back" to mid-scan). */
+.scanning-dialog-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-line);
+  border-top-color: var(--accent-bright);
+  margin: 0 auto 18px;
+  animation: scanning-spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scanning-dialog-icon {
+    animation: none;
+  }
+}
+
+@keyframes scanning-spin {
+  to { transform: rotate(360deg); }
+}
+
+.scanning-dialog-status {
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  color: var(--text);
+  min-height: 2.6em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+}
+
+.scanning-dialog-progress {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--glass-border);
+  overflow: hidden;
+  margin-top: 18px;
+}
+
+.scanning-dialog-progress::after {
+  content: '';
+  display: block;
+  height: 100%;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--accent-bright), transparent);
+  animation: scan-sweep 1.6s ease-in-out infinite;
+}
+
+.scanning-dialog-note {
+  text-align: center;
+  margin-top: 14px;
+  margin-bottom: 0;
+}
+
+.badge-style-toggle {
+  display: inline-flex;
+  gap: 4px;
+  background: #0e1424;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+  margin-bottom: 12px;
+}
+
+.badge-style-toggle button {
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  min-height: 0;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+}
+
+.badge-style-toggle button.active {
+  background: var(--accent-line);
+  color: var(--text);
+}
+
+.compliance-framework-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.compliance-framework-card {
+  background: #0e1424;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.compliance-framework-title {
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.compliance-gap-count {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.compliance-gap-count.gap {
+  color: var(--medium, #e0b400);
+}
+
+.compliance-gap-count.clear {
+  color: var(--pass, #1ea34c);
+}
+
 /* ---------------------------------------------------------------------
    Site footer
 --------------------------------------------------------------------- */

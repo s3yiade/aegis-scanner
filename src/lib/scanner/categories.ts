@@ -28,9 +28,17 @@ export const CATEGORY_META: Record<Finding['category'], { label: string; blurb: 
     label: 'Application-Level Checks',
     blurb: 'CORS configuration, API documentation exposure, and client-side code scanned for accidentally-committed secrets.',
   },
+  recon: {
+    label: 'Attack-Surface Recon',
+    blurb: 'Checks framed the way a threat actor doing reconnaissance on a target would run them: allowed HTTP methods, verbose error disclosure, Host header trust, open redirects, and unauthenticated endpoint exposure — tailored to the endpoint type (billing, admin, profile, webhook, ...) when one is given.',
+  },
+  cicd: {
+    label: 'CI/CD & Supply Chain Exposure',
+    blurb: 'Checks for publicly reachable build/deploy configuration — GitHub Actions, CircleCI, Jenkins, GitLab CI, Dockerfiles, Terraform state, and similar — that can leak internal infrastructure details or, in the worst case, credentials committed into the pipeline config itself.',
+  },
 };
 
-export const CATEGORY_ORDER: Finding['category'][] = ['headers', 'tls', 'dns', 'exposure', 'webapp'];
+export const CATEGORY_ORDER: Finding['category'][] = ['headers', 'tls', 'dns', 'exposure', 'webapp', 'recon', 'cicd'];
 
 /** Groups findings by category, in CATEGORY_ORDER, dropping empty groups. */
 export function groupByCategory(findings: Finding[]): { category: Finding['category']; label: string; findings: Finding[] }[] {

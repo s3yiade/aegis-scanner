@@ -1,11 +1,15 @@
 import { pinnedFetch, fetchFollowingRedirects, type SafeTarget } from '@/lib/ssrfGuard';
 import { getRegistrableDomain } from '@/lib/domain';
+import { discoverAndCrawl, type CrawledPage } from './crawler';
+import { checkVulnerableLibraries } from './vulnerableLibraries';
+import { checkMixedContent } from './mixedContent';
 import type { Finding } from '@/types/scan';
 
 const SHORT_TIMEOUT_MS = 6000;
-const MAX_SCRIPTS_SCANNED = 5;
+const MAX_SCRIPTS_SCANNED = 15; // across ALL crawled pages combined, not per-page
 const MAX_SCRIPT_BYTES = 2_000_000; // cap processing, not a hard network limit
 const MAX_REDIRECTS = 5;
+const MAX_CRAWLED_PAGES = 12; // additional pages beyond the homepage, via sitemap.xml — see crawler.ts
 
 /**
  * Everything here is specific to web apps/SaaS rather than generic
@@ -15,9 +19,17 @@ const MAX_REDIRECTS = 5;
  * signals. Runs alongside the other check categories in the main scan;
  * failures here are non-fatal to the overall scan (see the try/catch
  * wrapping in each sub-check).
+ *
+ * Secret/source-map/SRI checks run across every page this scan managed to
+ * crawl (homepage + up to MAX_CRAWLED_PAGES sitemap-discovered pages, see
+ * crawler.ts) rather than the homepage alone — a marketing homepage is
+ * often the least likely page to reference an internal/authenticated
+ * bundle; a dashboard or account page found via the sitemap is a much more
+ * representative sample.
  */
 export async function checkWebApp(target: SafeTarget): Promise<Finding[]> {
   let html = '';
+  let homepageUrl = target.originalUrl;
   try {
     // Follows redirects (bounded, re-validated per hop) before reading the
     // body — same reasoning as headers.ts: a plain http->https or
@@ -30,21 +42,60 @@ export async function checkWebApp(target: SafeTarget): Promise<Finding[]> {
       MAX_REDIRECTS
     );
     html = (await response.text()).slice(0, MAX_SCRIPT_BYTES);
+    homepageUrl = response.url || homepageUrl;
   } catch {
     // Homepage fetch already reported as a critical finding by
     // checkHeaders — no need to duplicate that here. HTML-dependent
     // sub-checks below just get an empty string and report accordingly.
   }
 
+  const homepage: CrawledPage = { url: homepageUrl, html };
+  const discovery = await discoverAndCrawl(target, homepageUrl, MAX_CRAWLED_PAGES).catch(
+    (): Awaited<ReturnType<typeof discoverAndCrawl>> => ({ source: 'none', totalUrlsFound: 0, pagesFetched: [] })
+  );
+  const pages: CrawledPage[] = [homepage, ...discovery.pagesFetched];
+
   const [cors, graphqlAndDocs, sourceMapsAndSecrets, sri, trust] = await Promise.all([
     checkCors(target).catch((): Finding[] => []),
     checkGraphQLAndApiDocs(target).catch((): Finding[] => []),
-    checkSourceMapsAndSecrets(target, html).catch((): Finding[] => []),
-    Promise.resolve(checkSRI(html, target)),
+    checkSourceMapsAndSecrets(target, pages).catch((): Finding[] => []),
+    Promise.resolve(checkSRI(pages, target)),
     Promise.resolve(checkTrustSignals(html)),
   ]);
 
-  return [...cors, ...graphqlAndDocs, ...sourceMapsAndSecrets, ...sri, ...trust];
+  const vulnerableLibraries = checkVulnerableLibraries(pages);
+  const mixedContent = checkMixedContent(pages, target.protocol);
+
+  return [
+    ...cors,
+    ...graphqlAndDocs,
+    ...sourceMapsAndSecrets,
+    ...sri,
+    ...trust,
+    ...vulnerableLibraries,
+    ...mixedContent,
+    crawlCoverageFinding(homepage, discovery),
+  ];
+}
+
+function crawlCoverageFinding(homepage: CrawledPage, discovery: Awaited<ReturnType<typeof discoverAndCrawl>>): Finding {
+  const pagesScanned = 1 + discovery.pagesFetched.length;
+  const detail =
+    discovery.source === 'none'
+      ? `No sitemap found (checked /sitemap.xml and robots.txt) — only the homepage (${homepage.url}) was scanned for secrets, source maps, and SRI.`
+      : `Found ${discovery.totalUrlsFound} same-origin URL(s) via ${discovery.source}; scanned ${pagesScanned} page(s) total (homepage + ${discovery.pagesFetched.length} discovered).`;
+  return {
+    id: 'crawl-coverage',
+    category: 'webapp',
+    title: 'Site crawl coverage',
+    severity: 'info',
+    detail,
+    recommendation:
+      discovery.source === 'none'
+        ? 'Publishing a sitemap.xml lets this scan (and search engines) discover more of your site — consider adding one if pages beyond the homepage matter for coverage here.'
+        : 'No action needed. This is a coverage disclosure, not a finding about your site — it explains how much of the site the checks below actually looked at.',
+    passed: true,
+  };
 }
 
 // --- CORS ---
@@ -256,7 +307,10 @@ function looksLikeApiDoc(body: string, contentType: string): boolean {
 
 // --- Source maps + client-side secret scanning ---
 
-const SECRET_PATTERNS: { name: string; regex: RegExp; severity: Finding['severity'] }[] = [
+// Exported so cicdChecks.ts can reuse the exact same pattern set/logic for
+// scanning CI/CD config file contents, rather than maintaining a second,
+// slowly-diverging copy of the same regexes.
+export const SECRET_PATTERNS: { name: string; regex: RegExp; severity: Finding['severity'] }[] = [
   { name: 'AWS Access Key ID', regex: /AKIA[0-9A-Z]{16}/, severity: 'critical' },
   { name: 'Stripe live secret key', regex: /sk_live_[0-9a-zA-Z]{16,}/, severity: 'critical' },
   // Deliberately excludes Google API keys (AIza...) — see checkGoogleApiKeys
@@ -295,7 +349,7 @@ function looksRandomEnough(value: string): boolean {
   return /\d/.test(value) && /[A-Za-z]/.test(value);
 }
 
-function isPlausibleSecretValue(value: string): boolean {
+export function isPlausibleSecretValue(value: string): boolean {
   if (PLACEHOLDER_VALUE_PATTERN.test(value)) return false;
   if (!looksRandomEnough(value)) return false;
   // All-one-character or short-repeating-pattern strings are placeholder
@@ -312,7 +366,7 @@ function isPlausibleSecretValue(value: string): boolean {
  * clear isPlausibleSecretValue() above before it counts as a hit. */
 const GENERIC_SECRET_REGEX = /['"]?(api[_-]?key|secret[_-]?key)['"]?\s*[:=]\s*['"]([A-Za-z0-9_\-]{20,80})['"]/gi;
 
-function findGenericSecretMatch(content: string): boolean {
+export function findGenericSecretMatch(content: string): boolean {
   GENERIC_SECRET_REGEX.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = GENERIC_SECRET_REGEX.exec(content))) {
@@ -355,12 +409,26 @@ function looksLikeSourceMap(body: string): boolean {
   return typeof obj.version !== 'undefined' && Array.isArray(obj.sources) && typeof obj.mappings === 'string';
 }
 
-export async function checkSourceMapsAndSecrets(target: SafeTarget, html: string): Promise<Finding[]> {
+export async function checkSourceMapsAndSecrets(target: SafeTarget, pages: CrawledPage[]): Promise<Finding[]> {
   const findings: Finding[] = [];
-  const scriptUrls = extractResourceUrls(html, 'script')
-    .map((u) => resolveIfSameOrigin(u, target))
-    .filter((u): u is string => Boolean(u))
-    .slice(0, MAX_SCRIPTS_SCANNED);
+
+  // Collect same-origin script URLs from every crawled page, resolving each
+  // relative src against ITS OWN page URL (not always the homepage — a
+  // script referenced with a relative path on /app/dashboard resolves
+  // differently than the same relative path would on /), then dedupe
+  // across pages before applying the combined scan cap.
+  const seen = new Set<string>();
+  const scriptUrls: string[] = [];
+  for (const page of pages) {
+    for (const rawUrl of extractResourceUrls(page.html, 'script')) {
+      const resolved = resolveIfSameOrigin(rawUrl, target, page.url);
+      if (!resolved || seen.has(resolved)) continue;
+      seen.add(resolved);
+      scriptUrls.push(resolved);
+      if (scriptUrls.length >= MAX_SCRIPTS_SCANNED) break;
+    }
+    if (scriptUrls.length >= MAX_SCRIPTS_SCANNED) break;
+  }
 
   if (scriptUrls.length === 0) {
     findings.push({
@@ -368,7 +436,7 @@ export async function checkSourceMapsAndSecrets(target: SafeTarget, html: string
       category: 'webapp',
       title: 'Client-side secret scan',
       severity: 'info',
-      detail: 'No same-origin scripts found to scan.',
+      detail: `No same-origin scripts found to scan across ${pages.length} page(s).`,
       recommendation: 'Not applicable.',
       passed: true,
     });
@@ -455,7 +523,7 @@ export async function checkSourceMapsAndSecrets(target: SafeTarget, html: string
           category: 'webapp',
           title: 'Client-side secret scan',
           severity: 'pass',
-          detail: `No obvious secret patterns found in ${scriptUrls.length} same-origin script(s) checked.`,
+          detail: `No obvious secret patterns found in ${scriptUrls.length} same-origin script(s) checked across ${pages.length} page(s).`,
           recommendation: 'No action needed. Note this is a pattern-based check, not a guarantee — it catches common key formats, not every possible secret.',
           passed: true,
         }
@@ -518,15 +586,16 @@ export async function checkSourceMapsAndSecrets(target: SafeTarget, html: string
 
 // --- Subresource Integrity / supply chain ---
 
-export function checkSRI(html: string, target: SafeTarget): Finding[] {
-  if (!html) {
+export function checkSRI(pages: CrawledPage[], target: SafeTarget): Finding[] {
+  const pagesWithHtml = pages.filter((p) => p.html);
+  if (pagesWithHtml.length === 0) {
     return [
       {
         id: 'sri',
         category: 'webapp',
         title: 'Subresource Integrity (SRI)',
         severity: 'info',
-        detail: 'Could not evaluate — homepage was unreachable.',
+        detail: 'Could not evaluate — no page was reachable.',
         recommendation: 'Not applicable.',
         passed: true,
       },
@@ -534,22 +603,33 @@ export function checkSRI(html: string, target: SafeTarget): Finding[] {
   }
 
   const ownDomain = getRegistrableDomain(target.hostname);
-  const resources = [
-    ...extractResourceTags(html, 'script').map((t) => ({ url: getAttr(t, 'src'), hasIntegrity: Boolean(getAttr(t, 'integrity')) })),
-    ...extractResourceTags(html, 'link')
-      .filter((t) => /rel\s*=\s*["']stylesheet["']/i.test(t))
-      .map((t) => ({ url: getAttr(t, 'href'), hasIntegrity: Boolean(getAttr(t, 'integrity')) })),
-  ].filter((r): r is { url: string; hasIntegrity: boolean } => Boolean(r.url));
+  const seenUrls = new Set<string>();
+  const thirdParty: { url: string; hasIntegrity: boolean }[] = [];
 
-  const thirdParty = resources.filter((r) => {
-    try {
-      const resolved = new URL(r.url, target.originalUrl);
-      if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return false; // data:, blob:, etc. — inline, not third-party
-      return getRegistrableDomain(resolved.hostname) !== ownDomain;
-    } catch {
-      return false;
+  for (const page of pagesWithHtml) {
+    const resources = [
+      ...extractResourceTags(page.html, 'script').map((t) => ({ url: getAttr(t, 'src'), hasIntegrity: Boolean(getAttr(t, 'integrity')) })),
+      ...extractResourceTags(page.html, 'link')
+        .filter((t) => /rel\s*=\s*["']stylesheet["']/i.test(t))
+        .map((t) => ({ url: getAttr(t, 'href'), hasIntegrity: Boolean(getAttr(t, 'integrity')) })),
+    ].filter((r): r is { url: string; hasIntegrity: boolean } => Boolean(r.url));
+
+    for (const r of resources) {
+      let resolved: URL;
+      try {
+        resolved = new URL(r.url, page.url);
+      } catch {
+        continue;
+      }
+      if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') continue; // data:, blob:, etc. — inline, not third-party
+      if (getRegistrableDomain(resolved.hostname) === ownDomain) continue;
+
+      const key = resolved.toString();
+      if (seenUrls.has(key)) continue;
+      seenUrls.add(key);
+      thirdParty.push({ url: key, hasIntegrity: r.hasIntegrity });
     }
-  });
+  }
 
   if (thirdParty.length === 0) {
     return [
@@ -558,7 +638,7 @@ export function checkSRI(html: string, target: SafeTarget): Finding[] {
         category: 'webapp',
         title: 'Third-party script/style supply chain',
         severity: 'info',
-        detail: 'No third-party scripts or stylesheets detected on the homepage.',
+        detail: `No third-party scripts or stylesheets detected across ${pagesWithHtml.length} page(s) checked.`,
         recommendation: 'Not applicable.',
         passed: true,
       },
@@ -574,7 +654,7 @@ export function checkSRI(html: string, target: SafeTarget): Finding[] {
           category: 'webapp',
           title: 'Third-party resources without Subresource Integrity',
           severity: 'medium',
-          detail: `${missingIntegrity.length} of ${thirdParty.length} third-party script(s)/stylesheet(s) load without an integrity attribute.`,
+          detail: `${missingIntegrity.length} of ${thirdParty.length} third-party script(s)/stylesheet(s) (across ${pagesWithHtml.length} page(s)) load without an integrity attribute.`,
           recommendation: 'Add an integrity (SRI) attribute to third-party <script>/<link> tags where the provider supports it. Without it, a compromise at that third party becomes a full compromise of this site — the browser has no way to detect the swapped content.',
           passed: false,
         }
@@ -653,12 +733,14 @@ function extractResourceUrls(html: string, tagName: 'script'): string[] {
     .filter((u): u is string => Boolean(u));
 }
 
-/** Resolves a possibly-relative resource URL and returns it only if it's
- * same-hostname as the target (pinnedFetch refuses cross-hostname requests
- * by design — this filters before we'd hit that rather than after). */
-function resolveIfSameOrigin(url: string, target: SafeTarget): string | null {
+/** Resolves a possibly-relative resource URL against `baseUrl` (the page it
+ * was found on — crawled pages live at different paths, so this can't
+ * always be the homepage) and returns it only if it's same-hostname as the
+ * target (pinnedFetch refuses cross-hostname requests by design — this
+ * filters before we'd hit that rather than after). */
+function resolveIfSameOrigin(url: string, target: SafeTarget, baseUrl: string): string | null {
   try {
-    const resolved = new URL(url, target.originalUrl);
+    const resolved = new URL(url, baseUrl);
     return resolved.hostname.toLowerCase() === target.hostname.toLowerCase() ? resolved.toString() : null;
   } catch {
     return null;

@@ -2,7 +2,7 @@ export type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info' | 'pass';
 
 export interface Finding {
   id: string;
-  category: 'headers' | 'tls' | 'dns' | 'exposure' | 'webapp';
+  category: 'headers' | 'tls' | 'dns' | 'exposure' | 'webapp' | 'recon' | 'cicd';
   title: string;
   severity: Severity;
   detail: string;
@@ -19,6 +19,11 @@ export interface ScanResult {
   findings: Finding[];
   scannedAt: string;
   niche?: string | null;
+  // Only meaningful when targetType === 'api' — which kind of endpoint this
+  // is (billing, admin, profile, webhook, ...). Tailors report copy and adds
+  // a handful of endpoint-specific paths to the access-surface recon check.
+  // See lib/scanner/endpointNiche.ts.
+  endpointType?: string | null;
   cloneCandidates: CloneCandidate[];
 }
 

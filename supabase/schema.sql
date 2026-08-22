@@ -14,6 +14,11 @@ create table if not exists scans (
   grade text not null,
   findings jsonb not null,
   niche text, -- e.g. 'jewelry', 'ecommerce', 'professional_services', null = generic
+  -- Only meaningful when target_type = 'api' — e.g. 'billing', 'admin',
+  -- 'auth_profile', 'webhook', 'internal_service', 'public_data'. Tailors
+  -- report copy and the recon check's access-surface path list. See
+  -- lib/scanner/endpointNiche.ts. null = generic/unspecified.
+  endpoint_type text,
   scanned_at timestamptz not null default now(),
   ip_address text, -- hashed, see lib/ratelimit.ts; used for abuse investigation only
   -- Zero-trust framing: this is an audit trail, not a technical control —
@@ -36,6 +41,10 @@ create index if not exists idx_scans_scanned_at on scans (scanned_at desc);
 -- lib/scanner/benchmark.ts), run once per active niche on every cron
 -- cycle — without this, that's a full-table scan on every run.
 create index if not exists idx_scans_niche_scanned_at on scans (niche, scanned_at) where niche is not null;
+
+-- Safe to re-run: `create table if not exists` above won't add this column
+-- to an already-provisioned scans table, so it's added explicitly here too.
+alter table scans add column if not exists endpoint_type text;
 
 create table if not exists leads (
   id uuid primary key default gen_random_uuid(),
@@ -81,6 +90,78 @@ create table if not exists monitors (
 
 create index if not exists idx_monitors_next_run on monitors (next_run_at) where active = true;
 create unique index if not exists idx_monitors_hostname_email on monitors (hostname, email);
+
+-- Pro-tier fields (Part 6 improvement: paid continuous monitoring + diff
+-- reports, gated to SaaS/API scans). Additive/defaulted so every existing
+-- free monitor is unaffected: tier='free', target_type='web', niche and
+-- endpoint_type null, pro_activated_at null.
+alter table monitors add column if not exists tier text not null default 'free' check (tier in ('free', 'pro'));
+alter table monitors add column if not exists pro_activated_at timestamptz;
+-- Carried over from the originating scan so re-scans (see api/cron/rescan)
+-- run with the same targetType/niche/endpointType framing as the original
+-- — without this, a SaaS/API monitor's re-scans would silently drift back
+-- to generic 'web' framing and lose the endpoint-type-specific recon paths
+-- (see lib/scanner/endpointNiche.ts) on every single re-scan after the first.
+alter table monitors add column if not exists target_type text not null default 'web' check (target_type in ('web', 'api'));
+alter table monitors add column if not exists niche text;
+alter table monitors add column if not exists endpoint_type text;
+-- Real recurring billing (see api/stripe/checkout mode: 'subscription' and
+-- the webhook's customer.subscription.deleted/updated handling) — needed
+-- to find this monitor from a subscription lifecycle event, and to open a
+-- Stripe billing portal session for the subscriber (api/stripe/portal).
+alter table monitors add column if not exists stripe_subscription_id text;
+alter table monitors add column if not exists stripe_customer_id text;
+create index if not exists idx_monitors_stripe_subscription_id on monitors (stripe_subscription_id) where stripe_subscription_id is not null;
+
+-- Paid tier of monitoring: continuous re-scans plus a structured diff
+-- report (added/resolved/changed findings, not just a score-changed email)
+-- between consecutive scans — see lib/scanner/diff.ts and api/cron/rescan.
+-- Gated to SaaS/API-type scans (enforced in api/stripe/checkout) — a
+-- website-only lead still gets the free monitor above, not this tier.
+--
+-- Deliberately its own table, not columns bolted directly onto `monitors`
+-- at checkout time (mirrors clone_watch_subscriptions / consult_requests /
+-- fix_guide_purchases): one row per checkout attempt, `paid` stays false
+-- until the Stripe webhook confirms it, and only then does the webhook
+-- upsert the actual `monitors` row to tier='pro'. Keeps "did they pay"
+-- fully separate from "is monitoring currently live", same as every other
+-- paid feature in this app — never trust the client-side success redirect
+-- alone (closed tab, back button after a failed card, etc.).
+create table if not exists monitor_pro_upgrades (
+  id uuid primary key default gen_random_uuid(),
+  scan_id uuid references scans(id) on delete set null,
+  hostname text not null,
+  target_url text not null,
+  target_type text not null default 'api',
+  niche text,
+  endpoint_type text,
+  email text not null,
+  email_trust text,
+  frequency text not null default 'daily' check (frequency in ('weekly', 'daily')),
+  paid boolean not null default false,
+  stripe_session_id text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_monitor_pro_upgrades_scan_id on monitor_pro_upgrades (scan_id);
+
+-- One row per re-scan, for pro-tier monitors only — the structured diff
+-- against the previous scan that powers the diff-report page
+-- (/monitor/[id]) and the diff alert email. Free-tier monitors never get
+-- rows here; they keep the existing plain score-changed email.
+create table if not exists monitor_diffs (
+  id uuid primary key default gen_random_uuid(),
+  monitor_id uuid not null references monitors(id) on delete cascade,
+  previous_scan_id uuid references scans(id) on delete set null,
+  new_scan_id uuid references scans(id) on delete set null,
+  score_delta int not null default 0,
+  added_findings jsonb not null default '[]',
+  resolved_findings jsonb not null default '[]',
+  changed_findings jsonb not null default '[]',
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_monitor_diffs_monitor_id on monitor_diffs (monitor_id, created_at desc);
 
 -- Peer/industry benchmark aggregates (Part 3 idea #5), refreshed periodically
 -- rather than computed live over the full scans table.
@@ -227,6 +308,8 @@ alter table consult_requests enable row level security;
 alter table clone_watch_subscriptions enable row level security;
 alter table admin_login_codes enable row level security;
 alter table fix_guide_purchases enable row level security;
+alter table monitor_pro_upgrades enable row level security;
+alter table monitor_diffs enable row level security;
 -- No policies are created: with RLS enabled and zero policies, every table is
 -- fully inaccessible to the anon/public roles. Only the service-role key
 -- (server-side only, never shipped to the browser) can read/write.
